@@ -1,6 +1,6 @@
-#include "linalifold.h"
+#include "lazyfold.h"
 
-void LinAliFold::GetRibosumMatrix(){
+void LazyFold::GetRibosumMatrix(){
   MakeRibosumData();
 
   double minimum = 1.0;
@@ -54,7 +54,7 @@ void LinAliFold::GetRibosumMatrix(){
 }
 
 
-void LinAliFold::MakeRibosumData(){
+void LazyFold::MakeRibosumData(){
   _all_ribosum_data[make_pair(12, 5)]
     = {{0,0,0,0,0,0,0},
        {0, 3.092536, 3.375764, 1.374085, 0.681999, 2.357501, 2.759147},

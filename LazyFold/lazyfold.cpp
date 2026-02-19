@@ -1,9 +1,16 @@
-#include "linalifold.h"
+#include "lazyfold.h"
+#include <algorithm>
+#include <cstdlib>
+#include <vector>
 
-void LinAliFold::Run(){
+void LazyFold::Run(){
   ReadData();
+  PrecomputeProfile();
+  Initialize();
   
-  Initialize(); 
+  // _gscore_output.open("gscores.csv");
+  // _gscore_output << "i,j,GScore,GBonus,ValidBPCount\n";
+  
   Parse();
   TraceBack();
  
@@ -11,9 +18,11 @@ void LinAliFold::Run(){
   cout << "score:" << setprecision(2) << -_outer_best[_alignment_length-1].score/100.0 << endl;
   cout << _structure << endl;
   
+  cout << "Average G Score: " << (_DEBUG_gscores_average / _DEBUG_gscores.size()) << "\n";
+  // _gscore_output.close();
 }
 
-void LinAliFold::Parse(){
+void LazyFold::Parse(){
   if(_alignment_length > 0){
     _outer_best[0].set(0, OUTER_eq_OUTER_plus_UNPAIRED);
   }
@@ -345,7 +354,7 @@ void LinAliFold::Parse(){
   }
 }
 
-void LinAliFold::TraceBack(){
+void LazyFold::TraceBack(){
   stack<tuple<int, int, State> > stk;
   stk.push(make_tuple(0, _alignment_length-1, _outer_best[_alignment_length-1]));
   
@@ -435,49 +444,165 @@ void LinAliFold::TraceBack(){
   return;
 }
 
-double LinAliFold::AllowBasePairs(int h, int i){  
-  if(_allowed_base_pair[h][i-h] != 0.0){
-    return(_allowed_base_pair[h][i-h]);
-  }
-  vector<int> type_freq(8,0);
-  
-  for(int s = 0; s < _num_of_seq; s++){
-    int index_h = _a2s_index[s][h];
-    int index_i = _a2s_index[s][i];    
-    
-    if(index_h >= 0 && index_i >= 0){
-      int nuc_h = _int_seq_list[s][index_h];
-      int nuc_i = _int_seq_list[s][index_i];
-      int type = BP_pair[nuc_h][nuc_i];
-      type_freq[type]++;
-    }else{
-      if(index_h < 0 && index_i < 0){
-	type_freq[7]++;
-      }else{
-	type_freq[0]++;
-      }
+void LazyFold::PrecomputeProfile() {
+    _profile.assign(_alignment_length, vector<int>(5, 0));
+    for (int i = 0; i < _alignment_length; i++) {
+        for (int s = 0; s < _num_of_seq; s++) {
+            int idx = _a2s_index[s][i];
+            if (idx >= 0) {
+                int nuc = _int_seq_list[s][idx];
+                if (nuc >= 0 && nuc < 4) _profile[i][nuc]++;
+                else _profile[i][4]++; 
+            } else {
+                _profile[i][4]++; 
+            }
+        }
     }
+
+    _log_table.resize(_num_of_seq + 1, 0.0);
+    for (int x = 1; x <= _num_of_seq; x++) {
+        _log_table[x] = log((double)x);
+    }
+
+    const int SAMPLE_SIZE = 1000;
+    vector<double> g_samples;
+    double total_identity = 0;
+
+    for (int k = 0; k < SAMPLE_SIZE; k++) {
+      int h = rand() % _alignment_length;
+      int i = rand() % _alignment_length;
+      if (abs(h - i) <= TURN) continue;
+      
+      int matches = 0, depth = 0;
+      for (int s = 0; s < _num_of_seq; s++) {
+          if (_a2s_index[s][h] >= 0 && _a2s_index[s][i] >= 0) {
+              if (_int_seq_list[s][_a2s_index[s][h]] == _int_seq_list[s][_a2s_index[s][i]]) matches++;
+              depth++;
+          }
+      }
+      if (depth > 0) total_identity += (double)matches / depth;
+
+      double g = GTestScore(min(h, i), max(h, i));
+      if (g > 0.01) g_samples.push_back(g);
   }
 
-  double score = 0.0;
-  for (int j = 1; j<=6; j++){
-    for(int k = j; k<=6; k++){
-      score += type_freq[j]*type_freq[k]*_ribosum_matrix[j][k];
-    }
+  if (!g_samples.empty()) {
+      double avg_id = total_identity / SAMPLE_SIZE;
+      
+      sort(g_samples.begin(), g_samples.end(), greater<double>());
+      int top_k = max(1, (int)(g_samples.size() * 0.10));
+      
+      double log_signal_sum = 0;
+      for(int j = 0; j < top_k; j++) log_signal_sum += log(1.0 + g_samples[j]);
+      double stabilized_g = exp(log_signal_sum / top_k) - 1.0;
+
+      if (_alpha <= 0) {
+          double diversity_weight = 0.4 + 0.6 * (1.0 - avg_id);
+          
+          double seq_boost = log2(_num_of_seq + 1);
+          if (seq_boost > 6.0) seq_boost = 6.0 + log(seq_boost - 5.0);
+
+          _alpha = (30.0 * diversity_weight * seq_boost) / (1.0 + log10(1.0 + stabilized_g));
+
+          cout << "Stabilized G: " << stabilized_g << " | Diversity: " << diversity_weight << endl;
+          cout << "Final Alpha: " << _alpha << endl;
+      }
   }
-  if (2*type_freq[0]+type_freq[7] < _num_of_seq) { 
-    
-    score = _beta * ((SCALE*score)/_num_of_seq - _delta*SCALE*(type_freq[0] + type_freq[7]*0.25));
-    score = score/_num_of_seq; //average
-    
-  }else{
-    score = NEG_INF;
-  }
-  _allowed_base_pair[h][i-h] = score;    
-  return(score);
 }
 
-int LinAliFold::DangleEnergy(int type, int a, int b, int seq_id){
+double LazyFold::GTestScore(int i, int j) {
+    int obs[4][4] = {0};
+    int valid_total = 0;
+    
+    for (int s = 0; s < _num_of_seq; s++) {
+        int idx_i = _a2s_index[s][i];
+        int idx_j = _a2s_index[s][j];
+        if (idx_i >= 0 && idx_j >= 0) {
+            int nuc_i = _int_seq_list[s][idx_i];
+            int nuc_j = _int_seq_list[s][idx_j];
+            if (nuc_i < 4 && nuc_j < 4) {
+                obs[nuc_i][nuc_j]++;
+                valid_total++;
+            }
+        }
+    }
+
+    if (valid_total < 2) return 0.0;
+
+    double G = 0.0;
+    int row_sums[4] = {0}, col_sums[4] = {0};
+    for(int r=0; r<4; r++) {
+        for(int c=0; c<4; c++) {
+            row_sums[r] += obs[r][c];
+            col_sums[c] += obs[r][c];
+        }
+    }
+
+    double log_total = _log_table[valid_total];
+
+    for (int r = 0; r < 4; r++) {
+        if (row_sums[r] == 0) continue;
+        double log_row = _log_table[row_sums[r]];
+        for (int c = 0; c < 4; c++) {
+            if (obs[r][c] > 0 && col_sums[c] > 0) {
+                G += obs[r][c] * (_log_table[obs[r][c]] - log_row - _log_table[col_sums[c]] + log_total);
+            }
+        }
+    }
+
+    return (2.0 * G) / (double)valid_total;
+}
+
+double LazyFold::AllowBasePairs(int h, int i) {
+    if (_allowed_base_pair[h][i-h] != 0.0) {
+        return _allowed_base_pair[h][i-h];
+    }
+
+    int type_freq[8] = {0};
+    int valid_bp_count = 0;
+
+    for (int s = 0; s < _num_of_seq; s++) {
+        int index_h = _a2s_index[s][h];
+        int index_i = _a2s_index[s][i];
+
+        if (index_h >= 0 && index_i >= 0) {
+            int type = BP_pair[_int_seq_list[s][index_h]][_int_seq_list[s][index_i]];
+            type_freq[type]++;
+            if (type > 0) valid_bp_count++;
+        } else {
+            (index_h < 0 && index_i < 0) ? type_freq[7]++ : type_freq[0]++;
+        }
+    }
+
+    double ribo_score = 0.0;
+    if (2 * type_freq[0] + type_freq[7] < _num_of_seq) {
+        for (int j = 1; j <= 6; j++) {
+            if (type_freq[j] == 0) continue;
+            for (int k = j; k <= 6; k++) {
+                ribo_score += (double)type_freq[j] * type_freq[k] * _ribosum_matrix[j][k];
+            }
+        }
+        ribo_score = _beta * ((SCALE * ribo_score) / _num_of_seq 
+                     - _delta * SCALE * (type_freq[0] + 0.25 * type_freq[7]));
+        ribo_score /= _num_of_seq;
+    } else {
+        return _allowed_base_pair[h][i-h] = NEG_INF;
+    }
+
+    double final_score = ribo_score;
+
+    if (_alpha > 0 && valid_bp_count > (_num_of_seq * 0.25)) {
+        double g_score = GTestScore(h, i);
+        double z = (g_score - _g_mean) / _g_std;
+        double weight = z / (1.0 + fabs(z));
+        
+        final_score += _alpha * max(0.0, weight);
+    }
+
+    return _allowed_base_pair[h][i-h] = final_score;
+}
+
+int LazyFold::DangleEnergy(int type, int a, int b, int seq_id){
   int x = 0;
   int len = _int_seq_list[seq_id].size();
   
@@ -489,7 +614,7 @@ int LinAliFold::DangleEnergy(int type, int a, int b, int seq_id){
   return(x);
 }
 
-int LinAliFold::HairpinEnergy(int i, int j, int nuc_i, int nuc_i_p1, int nuc_j_m1, int nuc_j){
+int LazyFold::HairpinEnergy(int i, int j, int nuc_i, int nuc_i_p1, int nuc_j_m1, int nuc_j){
     int size = j-i-1;    
     int type = BP_pair[nuc_i][nuc_j];
     int energy = size <= 30 ? hairpin37[size] : hairpin37[30] + (int)lxc37*log( size/30.);
@@ -503,7 +628,7 @@ int LinAliFold::HairpinEnergy(int i, int j, int nuc_i, int nuc_i_p1, int nuc_j_m
     return energy;
 }
 
-int LinAliFold::LoopEnergy(int type, int type2, int h, int i, int p, int q, int seq_id){
+int LazyFold::LoopEnergy(int type, int type2, int h, int i, int p, int q, int seq_id){
   int z=0;
   int u1 = h-p-1;
   int u2 = q-i-1;
@@ -546,26 +671,26 @@ int LinAliFold::LoopEnergy(int type, int type2, int h, int i, int p, int q, int 
   return z;
 }
 
-void LinAliFold::UpdateIfBetter(State& s, double new_score, Manner m){
+void LazyFold::UpdateIfBetter(State& s, double new_score, Manner m){
   
   if (s.score < new_score){
     s.set(new_score, m);
   }
 }
 
-void LinAliFold::UpdateIfBetter(State &s, double new_score, Manner m, int split){
+void LazyFold::UpdateIfBetter(State &s, double new_score, Manner m, int split){
   if (s.score < new_score || s.type == NONE){
     s.set(new_score, m, split);
   }
 };
 
-void LinAliFold::UpdateIfBetter(State &s, double new_score, Manner m, int l1, int l2){
+void LazyFold::UpdateIfBetter(State &s, double new_score, Manner m, int l1, int l2){
   if (s.score < new_score || s.type == NONE){
     s.set(new_score, m, l1, l2);
   }
 };
 
-void LinAliFold::Initialize(){
+void LazyFold::Initialize(){
   _stem_best.resize(_alignment_length);
   _multi2_best.resize(_alignment_length);
   _multi1_best.resize(_alignment_length);
@@ -579,7 +704,7 @@ void LinAliFold::Initialize(){
   }
 }
 
-int LinAliFold::QuickSelectPartition(vector<pair<int, int> >& scores, int lower, int upper){
+int LazyFold::QuickSelectPartition(vector<pair<int, int> >& scores, int lower, int upper){
   int pivot = scores[upper].first;
   while (lower < upper) {
     while (scores[lower].first < pivot) ++lower;
@@ -591,7 +716,7 @@ int LinAliFold::QuickSelectPartition(vector<pair<int, int> >& scores, int lower,
   return upper;
 }
 
-int LinAliFold::QuickSelect(vector<pair<int, int> >& scores, int lower,int upper, int k){
+int LazyFold::QuickSelect(vector<pair<int, int> >& scores, int lower,int upper, int k){
   if ( lower == upper ) return scores[lower].first;
   int split = QuickSelectPartition(scores, lower, upper);
   int length = split - lower + 1;
@@ -600,7 +725,7 @@ int LinAliFold::QuickSelect(vector<pair<int, int> >& scores, int lower,int upper
   else return QuickSelect(scores, split+1, upper, k - length);
 }
 
-void LinAliFold::SortMulti1(int threshold, unordered_map<int, State> &candidate, vector<pair<int, int> > &sorted_multi1){
+void LazyFold::SortMulti1(int threshold, unordered_map<int, State> &candidate, vector<pair<int, int> > &sorted_multi1){
   sorted_multi1.clear();
   
   for (auto &it : candidate) {
@@ -612,7 +737,7 @@ void LinAliFold::SortMulti1(int threshold, unordered_map<int, State> &candidate,
   sort(sorted_multi1.begin(), sorted_multi1.end(), greater<pair<int, int> >());
 }
 
-int LinAliFold::PruneBeam(unordered_map<int, State> &candidate_list){
+int LazyFold::PruneBeam(unordered_map<int, State> &candidate_list){
   vector<pair<int, int> > scores;
   
   for (auto &it : candidate_list) {
@@ -640,7 +765,7 @@ int LinAliFold::PruneBeam(unordered_map<int, State> &candidate_list){
   return threshold;
 }
 
-void LinAliFold::ReadData(){
+void LazyFold::ReadData(){
   ifstream fp;
   string buffer;
   fp.open(_input_file_name.c_str(),ios::in);
@@ -721,10 +846,10 @@ void LinAliFold::ReadData(){
   }
 }
 
-void LinAliFold::SetParameters(int argc,char* argv[]){
+void LazyFold::SetParameters(int argc,char* argv[]){
   int c;
   extern char *optarg;
-  while ((c = getopt(argc, argv, "i:b:d:e:r:")) != -1) {
+  while ((c = getopt(argc, argv, "i:b:d:e:r:a:")) != -1) {
     
     switch (c) {
     case 'i':
@@ -749,6 +874,10 @@ void LinAliFold::SetParameters(int argc,char* argv[]){
 
     case 'r':
       _ribosum_flag = atoi(optarg);
+      break;
+    
+    case 'a':
+      _alpha = atoi(optarg);
       break;
 
     default:

@@ -1,7 +1,7 @@
-#include "linalifold.h"
+#include "lazyfold.h"
 
 void PrintUsage() {
-  cout << "LinAliFold version 0.1.0 - Linear-time consensus structure prediction for RNA alignments." << endl;
+  cout << "LazyFold version 0.1.0 - Linear-time consensus structure prediction for RNA alignments." << endl;
 }
 
 int main(int argc, char** argv){
@@ -10,7 +10,7 @@ int main(int argc, char** argv){
     exit(1);
   }
   
-  LinAliFold lin_ali_fold;
+  LazyFold lin_ali_fold;
   lin_ali_fold.SetParameters(argc, argv);
   lin_ali_fold.Run();
 }

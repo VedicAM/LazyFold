@@ -1,5 +1,5 @@
-#ifndef LINALIFOLD_H
-#define LINALIFOLD_H
+#ifndef LazyFold_H
+#define LazyFold_H
 
 #include <getopt.h>
 #include <stdlib.h>
@@ -71,15 +71,17 @@ struct State {
   }
 };
 
-class LinAliFold{
+class LazyFold{
   public:
-  LinAliFold(){
+  LazyFold(){
     _beam_size = 100;
     _beta = 1.0;
     _delta  = 1.0;
     _conservation_score_threshold = NEG_INF;
     _input_file_name = "";
-    _ribosum_flag = 0;
+    _ribosum_flag = 1;
+    _DEBUG_gscores_average = 0;
+    _alpha = 0;
   }
   void Run();
   void SetParameters(int argc, char* argv[]);
@@ -90,6 +92,8 @@ private:
   void Initialize();
   void TraceBack();
   double AllowBasePairs(int h, int i);
+  double GTestScore(int i, int j);
+  void PrecomputeProfile();
   int PruneBeam(unordered_map<int, State> &candidate_list);
   int QuickSelect(vector<pair<int, int> >& scores, int lower,int upper, int k);
   int QuickSelectPartition(vector<pair<int, int> >& scores, int lower, int upper);
@@ -104,6 +108,11 @@ private:
   void MakeRibosumData();
 
   int _ribosum_flag;
+  int _alpha;
+  float _auto_alpha;
+  double _g_mean = 0.0;
+  double _g_std = 1.0;
+  const int G_SAMPLE_SIZE = 1000;
   int _beam_size;
   int _num_of_seq;
   int _alignment_length;
@@ -117,8 +126,15 @@ private:
   vector<vector<int> > _a2s_index; //alignment to sequences
   vector<vector<int> > _int_seq_list; //ungapped
   vector<vector<double> > _allowed_base_pair;
+  vector<vector<int>> _profile;
+  vector<double> _log_table;
   unordered_map<pair<int, int>, vector<vector <float> > ,hash_pair> _all_ribosum_data;
+  vector<vector <double> > _g_test;
   vector<vector <float> > _ribosum_matrix;
+
+  vector<double> _DEBUG_gscores;
+  int _DEBUG_gscores_average;
+  // ofstream _gscore_output;
 
   vector<unordered_map<int, State> > _stem_best;
   vector<unordered_map<int, State> > _multi2_best;
