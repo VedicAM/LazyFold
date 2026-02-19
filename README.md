@@ -1,5 +1,5 @@
 # LazyFold
-LazyFold is fast MFE and Covariation-based consensus secondary structure prediction software from RNA alignments using beam search and covariation tests.
+LazyFold is fast MFE and covariation-based consensus secondary structure prediction software from RNA alignments using beam search and covariation tests.
 
 ## Usage
 LazyFold can take a multi-FASTA format as an input file format, and predict its common secondary structure.
